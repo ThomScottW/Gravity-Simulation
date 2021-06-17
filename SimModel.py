@@ -1,10 +1,8 @@
 import math
 import random
 
-GRAVITATIONAL_CONSTANT = 10
 
-TEST = 1
-
+GRAVITATIONAL_CONSTANT = 0.01
 
 
 
@@ -67,6 +65,9 @@ class Vector:
 
 
 class Particle:
+    elasticity_coefficient = 0.5
+
+
     def __init__(
         self,
         radius: int,
@@ -76,8 +77,9 @@ class Particle:
     ):
         self.radius = radius
         self.x, self.y = position
-        self.mass = 1
+        self.mass = mass
         self._vector = vector  # Not needed outside this class.
+        self.absorbed = False
 
     def coordinates(self) -> (int):
         """Return the pixel coordinates of this Particle."""
@@ -97,53 +99,99 @@ class Particle:
         # Move the particle by the calculated amounts.
         self.x += dx
         self.y += dy
-        
 
-    def accelerate_towards(self, p2):
-        """Accelerate this particle towards another, based on
-        the masses of each particle."""
-        dx = self.x - p2.x
-        dy = self.y - p2.y
+    def accelerate_towards(self, point: (int, int), p_mass=1):
+        """Accelerate this particle towards a point."""
+        dx = point[0] - self.x
+        dy = point[1] - self.y
         dist = math.hypot(dx, dy)
 
-        angle_between_particles = math.atan2(dy, dx) + math.pi
+        angle_between_particles = math.atan2(dy, dx)
 
         # Gravitational equation
         # This will be the magnitude of the vector we will add to this particle's
         # existing vector.
-        force = (GRAVITATIONAL_CONSTANT * self.mass * p2.mass) / dist ** 2
+        force = (GRAVITATIONAL_CONSTANT * self.mass * p_mass) / dist ** 2
 
         # Calculate the x and y components of the force vector.
         force_x_comp = math.cos(angle_between_particles) * force
         force_y_comp = math.sin(angle_between_particles) * force
 
         # Add the force vector to this particle's vector.
-
-        global TEST
-
-        if TEST > 0:
-            print(f"In particle with radius {self.radius} acc towards particle with radius {p2.radius}")
-            print(f"The calculated angle was {angle_between_particles}")
-            print(f"Adding self vector {self._vector} to calculated vector {Vector(force_x_comp, force_y_comp)}")
-            
-
         self._vector = self._vector + Vector(force_x_comp, force_y_comp)
 
-        if TEST > 0:
-            print(f'For result {self._vector}')
-            TEST -= 1
+    def coalesce(self, p2) -> None:
+        """Collide with another particle, coalescing into a larger particle."""
+        if not self._is_colliding_with(p2):
+            return
 
-        # print(f'After: {self._vector}')
+        total_mass = self.mass + p2.mass
+
+        # Case where p1 is larger and absorbs p2.
+        if self.mass >= p2.mass:
+            # Create a new position and vector that is based on the masses
+            # of the particles.
+            self.x = (self.x * self.mass + p2.x * p2.mass) / total_mass
+
+            # The larger particle should stay moving in roughly the same direction, 
+            # but can be diverted slightly by the smaller particle.
+            smaller_vec_magnitude = (p2._vector.magnitude() * p2.mass) / total_mass
+            smaller_vec_angle = p2._vector.angle()
+            smaller_vec_x = math.cos(smaller_vec_angle) * smaller_vec_magnitude
+            smaller_vec_y = math.sin(smaller_vec_angle) * smaller_vec_magnitude
+
+            # Add this new weighted vector to p1's existing vector.
+            self._vector = self._vector + Vector(smaller_vec_x, smaller_vec_y)
+
+            # Apply "elasticity" to make it seem like the particle lost kinetic energy
+            # from the collision.
+            self._apply_elasticity()
+
+            # Update the mass and radius for this particle.
+            self.mass = total_mass
+            self.radius = self._calculate_radius(total_mass)
+
+            # Update p2 so that it has been "absorbed".
+            p2.absorbed = True
+
+        # Case where p2 is larger and absorbs p1.
+        elif p2.mass > self.mass:
+            p2.x = (p2.x * p2.mass + self.x * self.mass) / total_mass
+
+            smaller_vec_magnitude = (self._vector.magnitude() * self.mass) / total_mass
+            smaller_vec_angle = self._vector.angle()
+            smaller_vec_x = math.cos(smaller_vec_angle) * smaller_vec_magnitude
+            smaller_vec_y = math.sin(smaller_vec_angle) * smaller_vec_magnitude
+
+            p2._vector = p2._vector + Vector(smaller_vec_x, smaller_vec_y)
+
+            p2._apply_elasticity()
+
+            p2.mass = total_mass
+            p2.radius = self._calculate_radius(total_mass)
+
+            self.absorbed = True
     
+    def distance_from(self, point: (int, int)) -> float:
+        """Return the distance from this particle's center to a point."""
+        return math.hypot(point[0] - self.x, point[1] - self.y)
 
-    def collide_with(self, p2) -> None:
-        """Resolve a collision with another particle."""
-        pass
 
     def _is_colliding_with(self, p2) -> bool:
         """Return True if colliding with p2, else return False."""
-        pass
-
+        if self.distance_from(p2.coordinates()) < self.radius + p2.radius:
+            return True
+        else:
+            return False
+    
+    def _calculate_radius(self, mass):
+        """Given a mass, calculate the radius of a particle with that mass."""
+        return mass ** 0.5
+    
+    def _apply_elasticity(self):
+        self._vector = self._vector * Particle.elasticity_coefficient
+        
+        
 
 class Environment:
     """The environment that contains all the particles and constants
@@ -151,19 +199,19 @@ class Environment:
 
     # Define environment Constants.
 
-    def __init__(self, dimensions: (int, int)):
+    def __init__(self, dimensions: (int, int), num_particles=10):
         self._width, self._height = dimensions
         self._particles = []
 
         # Create random particles.
-        self._generate_particles(4)
+        self._generate_particles(num_particles)
 
     def __iter__(self):
         """Allow this environment to be iterated over, by giving
         access to the list of particles in the environment."""
         return iter(self._particles)
 
-    def _generate_particles(self, num=1, **kargs):
+    def _generate_particles(self, num=1):
         """Generate a number of particles with the provided attributes in **kargs.
 
         Any arguments that are not provided will be randomly generated.
@@ -171,36 +219,45 @@ class Environment:
         Populate the self._particles list attribute with these particles.
         """
         for _ in range(num):
-            # mass = kargs.get("mass", random.randint(100, 10000))
-            # radius = kargs.get("size", random.randint(10, 20))
-            # x = kargs.get("x", random.uniform(radius, self._width - radius))
-            # y = kargs.get("y", random.uniform(radius, self._height - radius))
-            # speed = kargs.get("speed", random.random())
-            # angle = kargs.get("angle", random.uniform(0, 2 * math.pi))
-            # color = kargs.get("color", (255, 0, 0))
 
-            radius = random.randint(5, 30)
-            mass = radius * 10
+            rand_num = random.random()
+
+            if rand_num < 0.98:
+                mass = random.randint(1, 3)
+            else:
+                mass = random.randint(50, 100)
+
+            radius =  mass ** 0.5
             x = random.uniform(radius, self._width - radius)
             y = random.uniform(radius, self._height - radius)
             speed = 0
             angle = random.uniform(0, 2 * math.pi)
-
             new_vector = Vector(math.cos(angle) * speed, math.sin(angle) * speed)
             new_particle = Particle(radius, (x, y), new_vector, mass)
             self._particles.append(new_particle)
+
+    def add_particle(self, position: (int, int), p_radius=5, p_mass=25):
+        """Add a particle to the simulation, given some attributes."""
+        new_particle = Particle(p_radius, position, Vector(0, 0), p_mass)
+        self._particles.append(new_particle)
+        
 
     def dimensions(self):
         return (self._width, self._height)
 
     def update(self) -> None:
         """Update the simulation to move particles, resolve collisions, etc."""
+        # First, check for and remove any absorbed particles from the simulation.
+        self._particles = [p for p in self._particles if not p.absorbed]
+
         for p in self._particles:
             p.move()
 
             for other_p in self._particles:
                 if p != other_p:
-                    p.accelerate_towards(other_p)
+                    p.accelerate_towards(other_p.coordinates(), other_p.mass)
+                    p.coalesce(other_p)
+                
 
     def _bounce(self, particle) -> None:
         """Bounce a particle off the boundaries of the Environment."""
